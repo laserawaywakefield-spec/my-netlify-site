@@ -2,63 +2,41 @@ const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 exports.handler = async (event) => {
-  try {
-    const rawBody = event.isBase64Encoded
-      ? Buffer.from(event.body, "base64").toString("utf8")
-      : event.body;
+  // 1) Let you test in a browser
+  if (event.httpMethod === "GET") {
+    return {
+      statusCode: 200,
+      body: "OK - stripe-webhook function is live (GET)",
+    };
+  }
 
+  try {
+    // 2) Decode body
+    const rawBody = event.isBase64Encoded
+      ? Buffer.from(event.body || "", "base64").toString("utf8")
+      : (event.body || "");
+
+    // 3) If Stripe is calling, this header will be present
     const sig =
       event.headers["stripe-signature"] ||
       event.headers["Stripe-Signature"];
 
     if (!sig) {
-      return { statusCode: 400, body: "Missing Stripe-Signature header" };
+      // This is NOT Stripe (or Stripe is hitting a different endpoint)
+      return {
+        statusCode: 400,
+        body: "Missing Stripe-Signature header (POST). This request did not come from Stripe.",
+      };
     }
 
+    // 4) Verify signature (production behaviour)
     const stripeEvent = stripe.webhooks.constructEvent(
       rawBody,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
 
-    if (stripeEvent.type === "payment_intent.succeeded") {
-      const payment = stripeEvent.data.object;
-      const text = (payment.description || "").toLowerCase();
-
-      const accounts = {
-        leeds: "acct_1R1wLrQuuLjRnbbz",
-        york: "acct_1R1svNQpZayq2ZV4",
-        halifax: "acct_1R1wLrQuuLjRnbbz",
-        tattoo: "acct_1QvLFPQrnn2odUYs",
-      };
-
-      let destination = null;
-
-      if (text.includes("tattoo") || text.includes("pigmentation")) {
-        destination = accounts.tattoo;
-      } else if (text.includes("leeds")) {
-        destination = accounts.leeds;
-      } else if (text.includes("york")) {
-        destination = accounts.york;
-      } else if (text.includes("halifax")) {
-        destination = accounts.halifax;
-      }
-
-      if (!destination) {
-        console.log("No destination match. Description:", payment.description);
-        return { statusCode: 200, body: "OK (no match)" };
-      }
-
-      await stripe.transfers.create({
-        amount: payment.amount_received,
-        currency: "gbp",
-        destination,
-      });
-
-      console.log("Transfer created to:", destination);
-    }
-
-    return { statusCode: 200, body: "OK" };
+    return { statusCode: 200, body: `Received ${stripeEvent.type}` };
   } catch (err) {
     return { statusCode: 400, body: `Webhook error: ${err.message}` };
   }
