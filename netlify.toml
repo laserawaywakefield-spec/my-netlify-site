@@ -1,0 +1,2 @@
+[functions."transfer-retry"]
+  schedule = "*/30 * * * *"
