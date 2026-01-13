@@ -1,6 +1,27 @@
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+function isFundsNotAvailableError(errMsg) {
+  const m = (errMsg || "").toLowerCase();
+  return (
+    m.includes("insufficient") ||
+    m.includes("available balance") ||
+    m.includes("balance is not sufficient") ||
+    m.includes("insufficient funds")
+  );
+}
+// 1) No match = no transfer
+if (!destination) {
+  console.log("No match for description:", payment.description);
+  return { statusCode: 200, body: "OK (no match)" };
+}
+
+// 2) Duplicate protection (if already done, do nothing)
+if (payment.metadata?.transfer_status === "done") {
+  console.log("Already transferred (metadata). PI:", payment.id);
+  return { statusCode: 200, body: "OK (already transferred)" };
+}
+
 exports.handler = async (event) => {
   if (event.httpMethod === "GET") {
     return { statusCode: 200, body: "OK - stripe-webhook live" };
@@ -62,26 +83,53 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: "No destination match" };
     }
 
-    await stripe.transfers.create(
-      {
-        amount: payment.amount_received,
-        currency: payment.currency || "gbp",
-        destination,
-        metadata: {
-          payment_intent: payment.id,
-          description: payment.description || "",
-        },
+    try {
+  await stripe.transfers.create(
+    {
+      amount: payment.amount_received,
+      currency: (payment.currency || "gbp").toLowerCase(),
+      destination,
+      metadata: {
+        payment_intent: payment.id,
+        description: payment.description || "",
       },
-      {
-        idempotencyKey: `transfer_${stripeEvent.id}`,
-      }
-    );
+    },
+    { idempotencyKey: `transfer_${stripeEvent.id}` } // prevents duplicates on retry
+  );
 
-    console.log("Transfer created to", destination);
-    return { statusCode: 200, body: "Processed" };
-  } catch (err) {
-    console.error("Webhook error:", err.message);
-    return { statusCode: 400, body: err.message };
+  // Mark success on the PaymentIntent
+  await stripe.paymentIntents.update(payment.id, {
+    metadata: {
+      ...payment.metadata,
+      transfer_status: "done",
+      transfer_destination: destination,
+      transfer_amount: String(payment.amount_received),
+      last_transfer_error: "",
+    },
+  });
+
+  console.log("Transfer created to", destination);
+} catch (err) {
+  const msg = err?.message || String(err);
+
+  // Delay transfer if funds not available yet
+  if (isFundsNotAvailableError(msg)) {
+    await stripe.paymentIntents.update(payment.id, {
+      metadata: {
+        ...payment.metadata,
+        transfer_status: "pending",
+        transfer_destination: destination,
+        transfer_amount: String(payment.amount_received),
+        last_transfer_error: msg.slice(0, 200),
+      },
+    });
+
+    console.log("Marked pending due to funds timing. PI:", payment.id);
+    return { statusCode: 200, body: "Marked pending" };
   }
-};
+
+  console.error("Transfer error:", msg);
+  return { statusCode: 400, body: `Transfer error: ${msg}` };
+}
+
 
