@@ -9,15 +9,22 @@ function isFundsNotAvailableError(errMsg) {
     m.includes("insufficient") ||
     m.includes("available balance") ||
     m.includes("balance is not sufficient") ||
-    m.includes("insufficient funds")
+    m.includes("insufficient funds") ||
+    m.includes("cannot create a transfer")
   );
 }
 
 exports.handler = async () => {
+  // 🔒 Kill switch (no deploy needed to toggle)
+  if (process.env.DISABLE_RETRY === "true") {
+    console.log("Retry disabled");
+    return { statusCode: 200, body: "Retry disabled" };
+  }
+
   try {
     let intents = [];
 
-    // Prefer Search if enabled
+    // Prefer Search API (faster + cheaper)
     try {
       const res = await stripe.paymentIntents.search({
         query: "metadata['transfer_status']:'pending'",
@@ -26,7 +33,9 @@ exports.handler = async () => {
       intents = res.data;
     } catch {
       const res = await stripe.paymentIntents.list({ limit: 100 });
-      intents = res.data.filter((pi) => pi.metadata?.transfer_status === "pending");
+      intents = res.data.filter(
+        (pi) => pi.metadata?.transfer_status === "pending"
+      );
     }
 
     for (const pi of intents) {
@@ -35,8 +44,6 @@ exports.handler = async () => {
       const currency = (pi.currency || "gbp").toLowerCase();
 
       if (!destination || !amount) continue;
-
-      // Skip if already done
       if (pi.metadata?.transfer_status === "done") continue;
 
       try {
@@ -66,7 +73,7 @@ exports.handler = async () => {
         const msg = err?.message || String(err);
 
         if (isFundsNotAvailableError(msg)) {
-          console.log("Still pending (funds). PI:", pi.id);
+          console.log("Still pending (funds not ready). PI:", pi.id);
           continue;
         }
 
@@ -84,6 +91,7 @@ exports.handler = async () => {
 
     return { statusCode: 200, body: "Retry run complete" };
   } catch (err) {
-    return { statusCode: 500, body: err?.message || String(err) };
+    console.error("Retry function error:", err.message);
+    return { statusCode: 500, body: err.message };
   }
 };
